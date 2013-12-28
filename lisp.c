@@ -10,8 +10,9 @@
 #define TYPE_STRING 5
 #define TYPE_NATIVE 6
 
-#define NEW(x) ((struct x *)calloc(sizeof(struct x), 1))
-#define NEW_ARRAY(x, y) ((struct x *)calloc(sizeof(struct x), y))
+#define ALLOC(x y) calloc(x, y)
+#define NEW(x) ((struct x *)ALLOC(sizeof(struct x), 1))
+#define NEW_ARRAY(x, y) ((struct x *)ALLOC(sizeof(struct x), y))
 #define DELETE(x) free(x)
 
 struct InputStream {
@@ -79,7 +80,7 @@ struct Env {
 struct CArray* carray_copy(struct CArray *carray) {
   struct CArray *result = NEW(CArray);
   result->length = carray->length;
-  result->data   = calloc(result->length, 1);
+  result->data   = ALLOC(result->length, 1);
   memcpy(result->data, carray->data, result->length);
   return result;
 };
@@ -89,14 +90,14 @@ void carray_copy_into(struct CArray *src, struct CArray *dst) {
     DELETE(dst->data);
   }
   dst->length = src->length;
-  dst->data   = calloc(dst->length, 1);
+  dst->data   = ALLOC(dst->length, 1);
   memcpy(dst->data, src->data, dst->length);
 };
 
 struct CArray* carray_copy_length(struct CArray *carray, int length) {
   struct CArray *result = NEW(CArray);
   result->length = length;
-  result->data   = calloc(result->length, 1);
+  result->data   = ALLOC(result->length, 1);
   memcpy(result->data, carray->data, result->length);
   return result;
 };
@@ -114,14 +115,14 @@ int next(struct InputStream *in) {
 struct CArray* carray_new(int length) {
   struct CArray *result = NEW(CArray);
   result->length = length;
-  result->data   = calloc(result->length, 1);
+  result->data   = ALLOC(result->length, 1);
   return result;
 }
 
 struct CArray* carray_from_cstr(char *str) {
   struct CArray *result = NEW(CArray);
   result->length = strlen(str);
-  result->data   = calloc(result->length, 1);
+  result->data   = ALLOC(result->length, 1);
   memcpy(result->data, str, result->length);
   return result;
 }
