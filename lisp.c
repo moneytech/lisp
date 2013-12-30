@@ -2,14 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define TYPE_INT    0
-#define TYPE_DOUBLE 1
-#define TYPE_FLOAT  2
-#define TYPE_SYMBOL 3
-#define TYPE_LIST   4
-#define TYPE_STRING 5
-#define TYPE_NATIVE 6
-
 #define ALLOC(x y) calloc(x, y)
 #define NEW(x) ((struct x *)ALLOC(sizeof(struct x), 1))
 #define NEW_ARRAY(x, y) ((struct x *)ALLOC(sizeof(struct x), y))
@@ -29,7 +21,24 @@ struct SymbolTable {
   int length;
 };
 
-typedef struct Value* (*native_func_t)(struct Value *value, struct SymbolTable *t, struct Env *env);
+typedef struct Value* (*NativeFunc)(struct Value *env, struct Value *args);
+
+#define TYPE_NIL    0
+#define TYPE_INT    1
+#define TYPE_DOUBLE 2
+#define TYPE_FLOAT  3
+#define TYPE_SYMBOL 4
+#define TYPE_PAIR   5
+#define TYPE_STRING 6
+#define TYPE_NATIVE 7
+#define TYPE_ERROR  8
+
+struct Value;
+
+struct Pair {
+  struct Value *head;
+  struct Value *tail;
+};
 
 struct Value {
   int type;
@@ -37,20 +46,15 @@ struct Value {
     int    ival;
     double dval;
     float  fval;
-    struct List *lval;
+    struct Pair pval;
     struct CArray *cval;
-    native_func_t nval;
+    NativeFunc nval;
   } v;
 };
 
 struct CArray {
   char *data;
   int length;
-};
-
-struct List {
-  struct Value *value;
-  struct List  *next;
 };
 
 struct InputStream *input_stream_new(FILE *inp) {
@@ -64,17 +68,6 @@ struct OutputStream *output_stream_new(FILE *outp) {
   struct OutputStream *out = NEW(OutputStream);
   out->out = outp;
   return out;
-};
-
-struct EnvPair {
-  int symbol;
-  struct Value value;
-};
-
-struct Env {
-  struct EnvPair *table;
-  int length;
-  struct Value* nil;
 };
 
 struct CArray* carray_copy(struct CArray *carray) {
@@ -172,45 +165,91 @@ struct CArray *symbol_table_get_carray(struct SymbolTable *table, int index) {
   return &table->table[index];
 }
 
-struct Env *new_env(int length) {
-  struct Env *table = NEW(Env);
-  table->length = length;
-  table->table  = NEW_ARRAY(EnvPair, length);
-  return table;
+struct Value* value_new(int type) {
+  struct Value *v = NEW(Value);
+  v->type = type;
+  return v;
 }
 
-void env_put(
-  struct Env *table, 
-  int symbol, 
+struct Value* value_nil_new() {
+  return value_new(TYPE_NIL);
+}
+
+struct Value *NIL = value_nil_new();
+
+struct Value* value_error_new() {
+  struct Value *v = value_new(TYPE_ERROR);
+  return v;
+}
+
+struct Value *value_pair_new(struct Value *head, struct Value *tail) {
+  struct Value *v = value_new(TYPE_PAIR);
+  v->v.pval.head = head;
+  v->v.pval.tail = tail;
+  return v;
+}
+
+int value_is_type(struct Value *value, int type) {
+  return value->type == type;
+}
+
+struct Value* env_put(
+  struct Value *env, 
+  struct Value *symbol, 
   struct Value *value
 ) {
-  int index = symbol % table->length;
-  while( 
-    table->table[index].symbol != 0 && 
-    table->table[index].symbol != symbol
-  ) {
-    index = (index + 1) % table->length;
+  return value_pair_new(value_pair_new(symbol, value), envDDD);
+}
+
+struct Value *env_new() {
+  return NIL;
+}
+
+int value_eq(Value *a, Value *b) {
+  if ( a == b ) {
+    return 1;
+  } else if ( a->type != b->type ) {
+    return 0;
+  } else if ( a->type == TYPE_SYM ) {
+    return a->v.ival == b->v.ival;
+  } else if ( a->type == TYPE_NIL ) {
+    return 1;
+  } else {
+    return a == b;
   }
-  table->table[index].symbol = symbol;
-  table->table[index].value  = *value;
+}
+
+struct Value* value_pair_head(struct Value *pair) {
+  if ( value_is_type(pair, TYPE_PAIR) ) {
+    return value->v.pval.head;
+  } else {
+    return NIL;
+  }
+}
+
+struct Value* value_pair_tail(struct Value *pair) {
+  if ( value_is_type(pair, TYPE_PAIR) ) {
+    return value->v.pval.tail;
+  } else {
+    return NIL;
+  }
 }
 
 struct Value* env_get(
-  struct Env *table, 
-  int symbol
+  struct Value *table,
+  struct Value *symbol
 ) {
-  int index = symbol % table->length;
-  while( 
-    table->table[index].symbol != 0 && 
-    table->table[index].symbol != symbol
-  ) {
-    index = (index + 1) % table->length;
-  }
-  if ( table->table[index].symbol != 0 ) {
-    return &table->table[index].value;
+  if ( value_eq(value_pair_head(table), symbol) ) {
+    return value_pair_tail(table);
   } else {
-    return 0;
+    return env_get(value_pair_tail(table), symbol);
   }
+}
+
+struct Value* value_native_new(NativeFunc nval) {
+  struct Value *result = new_value(TYPE_NATIVE);
+  result->v.nval = nval;
+  return result;
 }
 
 int is_alpha(int c) {
@@ -229,42 +268,15 @@ int is_alnum(int c) {
   return is_alpha(c) || is_numeric(c);
 }
 
-struct List* list_new() {
-  return 0;
-}
-
-struct List* list_append(struct List *l, struct Value *v) {
-  if ( l == 0 ) {
-    l = NEW(List);
-    l->value = v;
-  } else {
-    while(l->next != 0) {
-      l = l->next;
-    }
-    l->next = NEW(List);
-    l->next->value = v;
-  }
-  return l;
-}
-
-struct Value* value_new(int type) {
-  struct Value *v = NEW(Value);
-  v->type = type;
-  return v;
-}
-
 struct Value* parse_value(struct InputStream *in, struct SymbolTable *table);
 
 struct Value* parse_list(struct InputStream *in, struct SymbolTable *table) {
-  struct List *l = list_new();
   struct Value *v = parse_value(in, table);
-  while( v != 0 ) {
-    l = list_append(l, v);
-    v = parse_value(in, table);
+  if ( v != nil ) {
+    return value_list_prepend(v, parse_list(in, table));
+  } else {
+    return NIL;
   }
-  v = value_new(TYPE_LIST);
-  v->v.lval = l;
-  return v;
 }
 
 struct Value* parse_symbol(struct InputStream *in, struct SymbolTable *table, int c) {
@@ -378,59 +390,31 @@ void print_value(struct OutputStream *out, struct SymbolTable *symbol_table, str
   }
 }
 
-
-int value_is_non_empty_list(struct Value *value) {
-  return value->type == TYPE_LIST && value->v.ival != 0;
+struct Value* native_head(struct Value *env, Value *args) {
+  return value_pair_head(value_pair_head(args));
 }
 
-struct Value* value_nil(struct Env *env) {
-  return env->nil;
+struct Value* native_tail(struct Value *env, Value *args) {
+  return value_pair_tail(value_pair_head(args));
 }
 
-struct Value* value_new_list(struct List *list) {
-  struct Value *result = new_value(TYPE_LIST);
-  result->v.lval = list;
-  return result;
-}
+struct Value*
 
-struct Value* value_new_native(native_func nval) {
-  struct Value *result = new_value(TYPE_NATIVE);
-  result->v.nval = nval;
-  return result;
-}
-
-struct Value* head(Value *value, struct SymbolTable *t, struct Env *env) {
-  if ( value_is_non_empty_list(value) ) {
-    return value->v.ival->value;
-  } else {
-    return value_nil(env);
+struct Value* native_eval(struct Value *env, struct Value *value) {
+  if ( value_is_type(TYPE_PAIR) ) {
+    Value *h = value_head(value);
+    Value *t = value_tail(value);
+    if ( value_is_type(TYPE_SYM) ) {
+      h = env_get(env, h);
+    }
+    if ( value_is_type(TYPE_NATIVE_FUNC) ) {
+      return value_apply_func(env, h, lookup_list(env, t));
+    }
   }
-}
-
-struct Value* tail(Value *value, struct SymbolTable *t, struct Env *env) {
-  if ( value_is_non_empty_list(value) ) {
-    return value_new_list(value->v.ival->next);
-  } else {
-    return value_nil(env);
-  }
-}
-
-struct Value* list(Value *value, SymbolTable *t, Env *env) {
-  Value result = value_new(TYPE_LIST);
-  result->v.ival = value->v.ival->next;
-  return result;
-}
-
-struct Value* eval(struct Value *value, struct SymbolTable *t, struct Env *env) {
-  if ( value_is_non_empty_list(value) ) {
-    
-    Value *head_value = head(value, t, env);
-    if ( value_is_symbol(head_value) ) {
-      env_get(env, head);
-    return tail(value);
-  } else {
+  else {
     return value;
   }
+  return value;
 }
 
 struct Value* value_from_cstr(struct SymbolTable *symbol_table, char *cstr) {
@@ -439,15 +423,18 @@ struct Value* value_from_cstr(struct SymbolTable *symbol_table, char *cstr) {
   return result;
 }
 
+struct Value* sym(SymbolTable *symbol_table, char *str) {
+  return symbol_table_get(symbol_table, carray_from_cstr(str));
+}
+
 int main(int argc, char **argv) {
   struct InputStream *in = input_stream_new(stdin);
   struct OutputStream *out = output_stream_new(stdout);
   struct SymbolTable *symbol_table = symbol_table_new(1024);
   struct Env *env = env_new(256);
   env->nil = value_from_cstr(symbol_table, "nil");
-  env_put(env, symbol_table_get(symbol_table, carray_from_cstr("list")), value_new_native(&list));
-  env_put(env, symbol_table_get(symbol_table, carray_from_cstr("head")), value_new_native(&head));
-  env_put(env, symbol_table_get(symbol_table, carray_from_cstr("tail")), value_new_native(&tail));
+  env_put(env, sym(symbol_table, "head"), value_new_native(&head));
+  env_put(env, sym(symbol_table, "tail"), value_new_native(&tail));
   struct Value *value = parse_value(in, symbol_table);
   print_value(out, symbol_table, eval(value, symbol_table, env));
   return 0;
