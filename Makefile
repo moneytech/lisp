@@ -1,15 +1,7 @@
 
-all: test
+all: build/lisp
 
 build: build/lisp
-
-test: build
-	./test_lisp "()" "()"
-	./test_lisp "1" "1"
-	./test_lisp "(head (quote (1)))" "1"
-	./test_lisp "(tail (quote (1)))" "()"
-	./test_lisp "(tail (quote (1 2)))" "(2)"
-	./test_lisp "(let (a 1) a)" "(1)"
 
 build/lisp: lisp.c Makefile
 	mkdir -p build
@@ -21,5 +13,4 @@ clean:
 run: build/lisp
 	build/lisp
 
-
-.PHONY: run clean test build
+.PHONY: run clean build

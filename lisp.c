@@ -1,607 +1,621 @@
-// This is a small experiment trying to write a lisp interpreter.
-// The current implementation is not very correct. The next idea
-// to include is having the stack represented by a list rather
-// than relying on the C-stack
-//
-// Also of interest is that reverse is actually a primitive way to copy
-// lists. They can't be easily copied directly without creating references
-// to mutable objects
-//
-// There are some primitive evaluation forms
-//   (quote (1 2)) -> (1 2)
-//   (let (a 1) a) -> 
-//   (fn (a) a)
-//   (if (cond) (a) (b))
-//
-// Also of interest is propogating error conditions 
-//
-// Evaluation would proceed via a kind of copy to the stack
-//
-// (eval lhs rhs parent)
-//   (eval () (+ (+ 1 2) 3) ())
-//   (eval (#plus) ((+ 1 2) 3) ())
-//   (eval () (+ 1 2) (eval (#plus) (3) ()))
-//   (eval (#plus) (1 2) (eval (#plus) (3) ()))
-//   (eval (1 #plus) (2) (eval (#plus) (3) ()))
-//   (eval (1 2 #plus) () (eval (#plus) (3) ()))
-//   (eval (3) () (eval (#plus) (3) ()))
-//   (eval (3 #plus (3) ()))
-//   (eval (3 3 #plus) () ())
-//   6
-//
-// The event loop works by moving evaluations over from rhs to lhs
-// Whenever complex expression are encountered a new stack frame
-// is introdced with the old one linked in cont
-//
-// eval(lhs, rhs, cont)
-//   loop:
-//     if empty?(rhs) 
-//       if empty?(cont)
-//         return apply(lhs)
-//       else
-//         lhs <- append(apply(lhs), cont.lhs)
-//         rhs <- cont.rhs
-//         cont <- cont.cont
-//     else
-//       if primitive?(head(rhs)) then
-//         lhs <- append(head(rhs), lhs)
-//         rhs <- tail(rhs)
-//         cont <- cont
-//       else
-//         cont <- (lhs, tail(rhs), cont)
-//         lhs <- empty
-//         rhs <- head(rhs)
-//
-// The environment needs to be woven through this
-// structure so that it makes sense
-//
-// Applications may modify the environment
+#include "lisp.h"
 
-#include <memory.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <stdlib.h> // calloc
+#include <string.h> // memset
+#include <stdio.h>  // fprintf
 
-#define ALLOC(x,y) calloc(x, y)
-#define NEW(x) ((struct x *)ALLOC(sizeof(struct x), 1))
-#define NEW_ARRAY(x, y) ((struct x *)ALLOC(sizeof(struct x), y))
-#define DELETE(x) free(x)
+#define NEW(t) (t *)calloc(sizeof(t), 1)
+#define NEW_ARRAY(t, l) (t *)calloc(sizeof(t), l)
 
-struct InputStream {
-  int c;
-  FILE *in;
+struct elem EMPTY_LIST = { 
+  .type = ELEM_TYPE_LIST,
+  .lval.value = 0,
+  .lval.next = 0
 };
 
-struct OutputStream {
-  FILE *out;
+struct elem EMPTY_SET = { 
+  .type = ELEM_TYPE_SET,
+  .lval.value = 0,
+  .lval.next = 0 
 };
 
-struct SymbolTable {
-  struct CArray *table;
-  int length;
+struct elem EMPTY_MAP  = { 
+  .type       = ELEM_TYPE_MAP,
+  .mval.key   = 0,
+  .mval.value = 0,
+  .mval.next  = 0
 };
 
-typedef struct Value* (*NativeFuncPtr)(struct Value *env, struct Value *args);
+#define DEFINE_SYM(name, text)                    \
+  struct elem name  = {                           \
+    .type       = ELEM_TYPE_SYM,                  \
+    .sval.len   = sizeof(#text)-1,                \
+    .sval.str   = (uint8_t *)#text                \
+  };                                              \
+  struct elem *sym_##text() {                     \
+    return &name;                                 \
+  }                                               \
 
-#define TYPE_NIL        0
-#define TYPE_EMPTY_PAIR 1
-#define TYPE_INT        2
-#define TYPE_DOUBLE     3
-#define TYPE_FLOAT      4
-#define TYPE_SYMBOL     5
-#define TYPE_PAIR       6
-#define TYPE_STRING     7
-#define TYPE_NATIVE     8
-#define TYPE_ERROR      9
+DEFINE_SYM(SYM_ALLOC,  alloc)
+DEFINE_SYM(SYM_ENV,    env)
+DEFINE_SYM(SYM_RHS,    rhs)
+DEFINE_SYM(SYM_LHS,    lhs)
+DEFINE_SYM(SYM_PARENT, parent)
 
-struct Value;
-
-struct Pair {
-  struct Value *head;
-  struct Value *tail;
+struct elem NIL        = { 
+  .type = ELEM_TYPE_NIL,
+  .lval.value = 0,
+  .lval.next = 0
 };
 
-struct Value {
-  int type;
-  union {
-    int    ival;
-    double dval;
-    float  fval;
-    struct Pair pval;
-    struct CArray *cval;
-    NativeFuncPtr nval;
-  } v;
-};
+struct elem *map_get(struct elem *frame, struct elem *m, struct elem *k);
+struct elem *map_set(struct elem *frame, struct elem *m, struct elem *k, struct elem *v);
 
-struct CArray {
-  char *data;
-  int length;
-};
+struct elem *nil() {
+  return &NIL;
+}
 
-// Proto
+struct elem *empty_list() {
+  return &EMPTY_LIST;
+}
 
-struct Value* eval_value(struct Value *env, struct Value *args);
-struct Value* eval_list(struct Value *env, struct Value *args);
-struct Value* lookup_value(struct Value *env, struct Value *value);
+struct elem *empty_map() {
+  return &EMPTY_MAP;
+}
 
-struct InputStream *input_stream_new(FILE *inp) {
-  struct InputStream *in = NEW(InputStream);
-  in->c = fgetc(inp);
-  in->in = inp;
-  return in;
-};
+int list_is_empty(struct elem *t) {
+  return t == &EMPTY_LIST;
+}
 
-struct OutputStream *output_stream_new(FILE *outp) {
-  struct OutputStream *out = NEW(OutputStream);
-  out->out = outp;
-  return out;
-};
+int map_is_empty(struct elem *t) {
+  return t == &EMPTY_MAP;
+}
 
-struct CArray* carray_copy(struct CArray *carray) {
-  struct CArray *result = NEW(CArray);
-  result->length = carray->length;
-  result->data   = ALLOC(result->length, 1);
-  memcpy(result->data, carray->data, result->length);
-  return result;
-};
+int set_is_empty(struct elem *t) {
+  return t == &EMPTY_SET;
+}
 
-void carray_copy_into(struct CArray *src, struct CArray *dst) {
-  if ( dst->data != 0 ) {
-    DELETE(dst->data);
+struct elem *list_value(struct elem *s) {
+  return s->lval.value;
+}
+
+struct elem *list_next(struct elem *s) {
+  return s->lval.next;
+}
+
+struct elem *set_value(struct elem *s) {
+  return s->lval.value;
+}
+
+struct elem *set_next(struct elem *s) {
+  return s->lval.next;
+}
+
+struct elem *map_key(struct elem *s) {
+  return s->mval.key;
+}
+
+struct elem *map_value(struct elem *s) {
+  return s->mval.value;
+}
+
+struct elem *map_next(struct elem *s) {
+  return s->mval.next;
+}
+
+int is_list(struct elem *s) {
+  return s->type == ELEM_TYPE_LIST;
+}
+
+int is_sym(struct elem *s) {
+  return s->type == ELEM_TYPE_SYM;
+}
+
+struct elem *new_alloc_elem() {
+  struct elem  *e = NEW(struct elem);
+  e->type = ELEM_TYPE_ALLOC;
+  e->aval.alloc = NEW(struct alloc);
+  e->aval.alloc->len = 1000;
+  e->aval.alloc->tail = 0;
+  e->aval.alloc->table = NEW_ARRAY(struct elem, e->aval.alloc->len);
+  e->aval.alloc->free_list = 0;
+  return e;
+}
+
+struct elem *alloc_elem(struct elem *alloc_elem) {
+  struct alloc *alloc = alloc_elem->aval.alloc;
+  struct elem *ret;
+  if ( alloc->free_list != 0 ) {
+    ret = alloc->free_list;
+    alloc->free_list = alloc->free_list->lval.next;
+    memset(ret, 0, sizeof(struct elem));
+    return ret;
+  } else {
+    if ( alloc->tail < alloc->len ) {
+      ret = alloc->table + alloc->tail++;
+      memset(ret, 0, sizeof(struct elem));
+      return ret;
+    } else {
+      ret = nil();
+    }
   }
-  dst->length = src->length;
-  dst->data   = ALLOC(dst->length, 1);
-  memcpy(dst->data, src->data, dst->length);
-};
-
-struct CArray* carray_copy_length(struct CArray *carray, int length) {
-  struct CArray *result = NEW(CArray);
-  result->length = length;
-  result->data   = ALLOC(result->length, 1);
-  memcpy(result->data, carray->data, result->length);
-  return result;
-};
-
-int peek(struct InputStream *in) {
-  return in->c;
+  return ret;
 }
 
-int next(struct InputStream *in) {
-  int result = in->c;
-  in->c = fgetc(in->in);
-  return result;
+struct elem *frame_alloc_elem(struct elem *frame) {
+  struct elem *a = map_get(frame, frame, sym_alloc());
+  return alloc_elem(a);
 }
 
-struct CArray* carray_new(int length) {
-  struct CArray *result = NEW(CArray);
-  result->length = length;
-  result->data   = ALLOC(result->length, 1);
-  return result;
-}
-
-struct CArray* carray_from_cstr(char *str) {
-  struct CArray *result = NEW(CArray);
-  result->length = strlen(str);
-  result->data   = ALLOC(result->length, 1);
-  memcpy(result->data, str, result->length);
-  return result;
-}
-
-void carray_delete(struct CArray *carray) {
-  DELETE(carray->data);
-  DELETE(carray);
-}
-
-int carray_hash(struct CArray *carray) {
-  int i, r=0;
-  for(i=0;i<carray->length;++i) {
-    r ^= carray->data[i];
+struct elem *new_int(struct elem *frame, int i) {
+  struct elem *ret = frame_alloc_elem(frame);
+  if ( ret != 0 ) {
+    ret->type = ELEM_TYPE_INT;
+    ret->ival.value = i;
   }
-  return r;
+  return ret;
 }
 
-int carray_eq(struct CArray *a, struct CArray *b) {
-  if ( a->length != b->length ) {
+struct elem *new_string(struct elem *frame, char *s) {
+  struct elem *ret = frame_alloc_elem(frame);
+  ret->type = ELEM_TYPE_STRING;
+  ret->sval.len = strlen(s) + 1;
+  ret->sval.str = NEW_ARRAY(uint8_t, ret->sval.len+1);
+  memcpy(ret->sval.str, s, ret->sval.len);
+  return ret;
+}
+
+struct elem *new_error(struct elem *frame, char *s) {
+  struct elem *ret = frame_alloc_elem(frame);
+  ret->type = ELEM_TYPE_ERROR;
+  ret->sval.len = strlen(s) + 1;
+  ret->sval.str = NEW_ARRAY(uint8_t, ret->sval.len+1);
+  memcpy(ret->sval.str, s, ret->sval.len);
+  return ret;
+}
+
+struct elem *new_root_frame() {
+  struct elem *a = new_alloc_elem();
+  struct elem *f = alloc_elem(a);
+  f->type = ELEM_TYPE_MAP;
+  f->mval.key = sym_alloc();
+  f->mval.value = a;
+  f->mval.next = empty_map();
+  return f;
+}
+
+int elem_is_type(struct elem *e, int type) {
+  return e->type == type;
+}
+
+struct elem *alloc_map(
+  struct elem *frame, 
+  struct elem *m, 
+  struct elem *k, 
+  struct elem *v
+) {
+  struct elem *ret = frame_alloc_elem(frame);
+  ret->type = ELEM_TYPE_MAP;
+  ret->mval.key = k;
+  ret->mval.value = v;
+  ret->mval.next = m;
+  return ret;
+}
+
+struct elem *alloc_list(
+  struct elem *frame, 
+  struct elem *l, 
+  struct elem *v
+) {
+  struct elem *ret = frame_alloc_elem(frame);
+  ret->type = ELEM_TYPE_LIST;
+  ret->lval.value = v;
+  ret->lval.next = l;
+  return ret;
+}
+
+struct elem *alloc_set(
+  struct elem *frame, 
+  struct elem *s, 
+  struct elem *v
+) {
+  struct elem *ret = frame_alloc_elem(frame);
+  ret->type = ELEM_TYPE_SET;
+  ret->lval.value = v;
+  ret->lval.next = s;
+  return ret;
+}
+
+int list_contains(struct elem *frame, struct elem *s, struct elem *x) {
+  if ( list_is_empty(s) ) {
     return 0;
   }
-  return memcmp(a->data, b->data, a->length) == 0;
-}
-
-struct SymbolTable* st_new(int length) {
-  struct SymbolTable *table = NEW(SymbolTable);
-  table->length = length;
-  table->table  = NEW_ARRAY(CArray, length);
-  return table;
-}
-
-int st_get(struct SymbolTable *table, struct CArray* carray) {
-  int index = carray_hash(carray) % table->length;
-  while( 
-    table->table[index].length != 0 && 
-    ! carray_eq(carray, table->table + index) 
-  ) {
-    index = (index + 1) % table->length;
+  if ( elem_eq(frame, list_value(s), x) ) {
+    return 1;
   }
-  if ( table->table[index].length == 0 ) {
-    carray_copy_into(carray, table->table + index);
+  return list_contains(frame, list_next(s), x);
+}
+
+int set_contains(struct elem *frame, struct elem *s, struct elem *x) {
+  if ( set_is_empty(s) ) {
+    return 0;
   }
-  return index;
+  if ( elem_eq(frame, set_value(s), x) ) {
+    return 1;
+  }
+  return set_contains(frame, set_next(s), x);
 }
 
-struct CArray *st_get_carray(struct SymbolTable *table, int index) {
-  return &table->table[index];
+int map_contains_key(struct elem *frame, struct elem *m, struct elem *x) {
+  if ( map_is_empty(m) ) {
+    return 0;
+  }
+  if ( elem_eq(frame, map_key(m), x) ) {
+    return 1;
+  }
+  return map_contains_key(frame, map_next(m), x);
 }
+  
 
-struct Value* value_new(int type) {
-  struct Value *v = NEW(Value);
-  v->type = type;
-  return v;
-}
-
-struct Value* value_nil_new() {
-  return value_new(TYPE_NIL);
-}
-
-struct Value* value_empty_pair_new() {
-  return value_new(TYPE_EMPTY_PAIR);
-}
-
-struct Value *NIL;
-struct Value *EMPTY_PAIR;
-
-struct Value* value_error_new() {
-  struct Value *v = value_new(TYPE_ERROR);
-  return v;
-}
-
-struct Value *value_pair_new(struct Value *head, struct Value *tail) {
-  struct Value *v = value_new(TYPE_PAIR);
-  v->v.pval.head = head;
-  v->v.pval.tail = tail;
-  return v;
-}
-
-int value_is_type(struct Value *value, int type) {
-  return value->type == type;
-}
-
-struct Value* assoc_value(
-  struct Value *env, 
-  struct Value *symbol, 
-  struct Value *value
-) {
-  return value_pair_new(value_pair_new(symbol, value), env);
-}
-
-struct Value *env_new() {
-  return EMPTY_PAIR;
-}
-
-int value_eq(struct Value *a, struct Value *b) {
+int set_subset_eq(struct elem *frame, struct elem *a, struct elem *b) {
   if ( a == b ) {
     return 1;
-  } else if ( a->type != b->type ) {
+  }
+  if ( list_is_empty(a) ) {
     return 0;
-  } else if ( a->type == TYPE_SYMBOL ) {
-    return a->v.ival == b->v.ival;
-  } else {
-    return a == b;
   }
+  if ( list_is_empty(b) ) {
+    return 0;
+  }
+  if ( ! set_contains(frame, list_value(a), b) ) {
+    return 0;
+  }
+  return list_eq(frame, list_next(a), b);
 }
 
-struct Value* value_pair_head(struct Value *pair) {
-  if ( value_is_type(pair, TYPE_PAIR) ) {
-    return pair->v.pval.head;
-  } else {
-    return NIL;
-  }
+int set_eq(struct elem *frame, struct elem *a, struct elem *b) {
+  return set_subset_eq(frame, a, b) && set_subset_eq(frame, b, a);
 }
 
-struct Value* value_pair_tail(struct Value *pair) {
-  if ( value_is_type(pair, TYPE_PAIR) ) {
-    return pair->v.pval.tail;
-  } else {
-    return EMPTY_PAIR;
+int list_sublist_eq(struct elem *frame, struct elem *a, struct elem *b) {
+  if ( a == b ) {
+    return 1;
   }
+  if ( list_is_empty(a) ) {
+    return 0;
+  }
+  if ( list_is_empty(b) ) {
+    return 1;
+  }
+  if ( ! elem_eq(frame, list_value(a), list_value(b)) ) {
+    return 0;
+  }
+  return list_sublist_eq(frame, list_next(a), list_next(b));
 }
 
-struct Value* rev(struct Value *env, struct Value *lst) {
-  struct Value *res = EMPTY_PAIR;
-  while(lst != EMPTY_PAIR) {
-    res = value_pair_new(value_pair_head(lst), res);
-    lst = value_pair_tail(lst);
+int list_eq(struct elem *frame, struct elem *a, struct elem *b) {
+  if ( a == b ) {
+    return 1;
   }
-  return res;
+  if ( list_is_empty(a) ) {
+    return 0;
+  }
+  if ( list_is_empty(b) ) {
+    return 0;
+  }
+  if ( ! elem_eq(frame, list_value(a), list_value(b)) ) {
+    return 0;
+  }
+  return list_eq(frame, list_value(a), list_value(b)); 
 }
 
-struct Value* lookup_value(
-  struct Value *env,
-  struct Value *value
-) {
-  if ( value_is_type(value, TYPE_SYMBOL) ) {
-    if ( env == EMPTY_PAIR ) {
-      return NIL;
-    } else {
-      struct Value *h = value_pair_head(env);
-      if ( value_eq(value_pair_head(h), value) ) {
-        return value_pair_tail(h);
-      } else {
-        return lookup_value(value_pair_tail(env), value);
-      }
+int map_submap_eq(struct elem *frame, struct elem *a, struct elem *b) {
+  if ( map_is_empty(a) ) {
+    return 1;
+  }
+  struct elem *key = a->mval.key;
+  struct elem *value = a->mval.value;
+  return elem_eq(frame, map_get(frame, b, key), value) && map_submap_eq(frame, map_next(a), b);
+}
+
+int map_eq(struct elem *frame, struct elem *a, struct elem *b) {
+  return map_submap_eq(frame, a, b) && map_submap_eq(frame, b, a);
+}
+
+int ival_eq(struct elem *frame, struct elem *a, struct elem *b) {
+  return a->ival.value == b->ival.value;
+}
+
+int sval_eq(struct elem *frame, struct elem *a, struct elem *b) {
+  int i;
+  if ( a->sval.len != b->sval.len ) {
+    return 0;
+  }
+  for(i=0;i<a->sval.len;++i) {
+    if (a->sval.str[i] != b->sval.str[i]) {
+      return 0;
     }
-  } else {
-    return value;
   }
+  return 1;
 }
 
-struct Value* value_native_new(NativeFuncPtr nval) {
-  struct Value *result = value_new(TYPE_NATIVE);
-  result->v.nval = nval;
-  return result;
-}
-
-int is_alpha(int c) {
-  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-}
-
-int is_white_space(int c) {
-  return c == ' ' || c == '\t' || c == '\n' || c == '\r';
-}
-
-int is_numeric(int c) {
-  return (c >= '0' && c <= '9');
-}
-
-int is_alnum(int c) {
-  return is_alpha(c) || is_numeric(c);
-}
-
-struct Value* parse_value(struct InputStream *in, struct SymbolTable *table);
-
-struct Value* value_list_prepend(struct Value *head, struct Value *tail) {
-  struct Value *list = value_new(TYPE_PAIR);
-  list->v.pval.head = head;
-  list->v.pval.tail = tail;
-  return list;
-}
-
-struct Value* parse_list(struct InputStream *in, struct SymbolTable *table) {
-  struct Value *v = parse_value(in, table);
-  if ( v != EMPTY_PAIR ) {
-    return value_list_prepend(v, parse_list(in, table));
-  } else {
-    return EMPTY_PAIR;
+int elem_eq(struct elem *frame, struct elem *a, struct elem *b) {
+  if ( a == b ) {
+    return 1;
   }
-}
-
-struct Value* parse_symbol(struct InputStream *in, struct SymbolTable *table, int c) {
-  struct CArray *buf = carray_new(1024);
-  struct Value *v = value_new(TYPE_SYMBOL);
-  int i =0;
-
-  buf->data[i++] = c;
-  while( is_alnum(peek(in)) && i < buf->length) {
-    buf->data[i++] = next(in);
+  if ( a->type != b->type ) {
+    return 0;
   }
-  buf->length = i;
-
-  v->v.ival = st_get(table, buf);
-
-  carray_delete(buf);
-  return v;
-}
-
-struct Value* parse_string(struct InputStream *in, struct SymbolTable *table) {
-  struct CArray *buf = carray_new(1024);
-  struct Value *v = value_new(TYPE_STRING);
-  int i = 0;
-
-  while(i < buf->length-1 && peek(in) != '"' ) {
-    if ( peek(in) == '\\' ) {
-      next(in);
-    }
-    buf->data[i++] = next(in);
+  switch(a->type) {
+  case ELEM_TYPE_NIL:
+    return 0;
+  case ELEM_TYPE_INT:
+    return ival_eq(frame, a, b);
+  case ELEM_TYPE_LIST:
+    return list_eq(frame, a, b);
+  case ELEM_TYPE_STRING:
+    return sval_eq(frame, a, b);
+  case ELEM_TYPE_ERROR:
+    return 0;
+  case ELEM_TYPE_SYM:
+    return sval_eq(frame, a, b);
+  case ELEM_TYPE_SET:
+    return set_eq(frame, a, b);
+  case ELEM_TYPE_MAP:
+    return map_eq(frame, a, b);
+  case ELEM_TYPE_FN:
+    return 0;
+  default:
+    abort(); // invalid type
   }
-  next(in);
-  v->v.cval = carray_copy_length(buf, i);
-
-  carray_delete(buf);
-  return v;
-}
-
-struct Value* parse_numeric(struct InputStream *in, struct SymbolTable *table, int c) {
-  struct Value *v = value_new(TYPE_INT);
-  v->v.ival = c - '0';
-
-  while(is_alpha(peek(in))) {
-    v->v.ival *= 10;
-    v->v.ival += next(in) - '0';
-  }
-
-  return v;
-}
-
-struct Value* parse_value(struct InputStream *in, struct SymbolTable *table) {
-  int c = next(in);
-  struct Value *v = 0;
-
-  while( is_white_space(c) ) {
-    c = next(in);
-  }
-  if ( c == '(' ) {
-    v = parse_list(in, table);
-  } else if ( c == ')' ) {
-    v = EMPTY_PAIR;
-  } else if ( is_alpha(c) ) {
-    v = parse_symbol(in, table, c);
-  } else if ( c == '"' ) {
-    v = parse_string(in, table);
-  } else if ( is_numeric(c) ) {
-    v = parse_numeric(in, table, c);
-  } 
-  return v;
-}
-
-void print_char(struct OutputStream *out, int c) {
-  fputc(c, out->out);
-}
-
-void print_cstr(struct OutputStream *out, char *cstr) {
-  while( *cstr ) {
-    fputc(*cstr, out->out);
-    cstr++;
-  }
-}
-
-void print_carray(struct OutputStream *out, struct CArray *carray) {
-  int i = 0;
-  for(i=0;i<carray->length;++i) {
-    if ( carray->data[i] == '\\' || carray->data[i] == '"' ) {
-      print_char(out, '\\');
-    }
-    print_char(out, carray->data[i]);
-  }
-}
-
-void print_space(struct OutputStream *out) {
-  print_char(out, ' ');
-}
-
-void print_integer(struct OutputStream *out, int v) {
-  fprintf(out->out, "%d", v);
-}
-
-void print_value(struct OutputStream *out, struct SymbolTable *st, struct Value *v) {
-  if ( v->type == TYPE_SYMBOL ) {
-    print_carray(out, st_get_carray(st, v->v.ival));
-  } else if ( v->type == TYPE_INT ) {
-    print_integer(out, v->v.ival);
-  } else if ( v->type == TYPE_STRING ) {
-    print_char(out, '"');
-    print_carray(out, v->v.cval);
-    print_char(out, '"');
-  } else if ( v->type == TYPE_NATIVE ) {
-    print_cstr(out, "#native");
-  } else if ( v->type == TYPE_PAIR || v == EMPTY_PAIR ) {
-    print_char(out, '(');
-    struct Value *list = v;
-    while(list != EMPTY_PAIR) {
-      print_value(out, st, value_pair_head(list));
-      list = value_pair_tail(list);
-      if ( list != EMPTY_PAIR ) {
-        print_char(out, ' ');
-      }
-    }
-    print_char(out, ')');
-  } else if ( v == NIL ) {
-    print_cstr(out, "nil");
-  }
-}
-
-struct Value* native_head(struct Value *env, struct Value *args) {
-  return value_pair_head(value_pair_head(eval_list(env, args)));
-}
-
-struct Value* native_tail(struct Value *env, struct Value *args) {
-  return value_pair_tail(value_pair_head(eval_list(env, args)));
-}
-
-struct Value *assoc_list(struct Value *env, struct Value *val) {
-  if ( val == EMPTY_PAIR ) {
-    return env;
-  } else {
-    env = assoc_value(env, value_pair_head(val), value_pair_head(value_pair_tail(val)));
-    return assoc_list(env, value_pair_tail(value_pair_tail(val)));
-  }
-}
-
-struct Value* native_let(struct Value *env, struct Value *args) {
-  env = assoc_list(env, value_pair_head(args));
-  return eval_list(env, value_pair_tail(args));
-}
-
-struct Value* native_quote(struct Value *env, struct Value *args) {
-  return value_pair_head(args);
-}
-
-NativeFuncPtr value_native_get_func(struct Value *func) {
-  return func->v.nval;
-}
-
-struct Value* value_apply_func(struct Value *env, struct Value *func, struct Value *args) {
-  return (*value_native_get_func(func))(env, args);
-}
-
-struct Value* eval_list(struct Value *env, struct Value *args) {
-  if ( args == EMPTY_PAIR ) {
-    return args;
-  } else {
-    return value_pair_new(eval_value(env, value_pair_head(args)), eval_list(env, value_pair_tail(args)));
-  }
-}
-
-struct Value* eval_value(struct Value *env, struct Value *value) {
-  if ( value_is_type(value, TYPE_PAIR) ) {
-    struct Value *h = value_pair_head(value);
-    struct Value *t = value_pair_tail(value);
-    if ( value_is_type(h, TYPE_SYMBOL) ) {
-      h = lookup_value(env, h);
-    }
-    if ( value_is_type(h, TYPE_NATIVE) ) {
-      return value_apply_func(env, h, t);
-    } else {
-      return NIL;
-    }
-  } else if ( value_is_type(value, TYPE_SYMBOL) ) {
-    return lookup_value(env, value);
-  }
-  else {
-    return value;
-  }
-}
-
-struct Value* sym(struct SymbolTable *st, char *cstr) {
-  struct Value* result = value_new(TYPE_SYMBOL);
-  result->v.ival = st_get(st, carray_from_cstr(cstr));
-  return result;
-}
-
-void init() {
-  NIL = value_nil_new();
-  EMPTY_PAIR = value_empty_pair_new();
-}
-
-struct Value *assoc(struct Value *env, struct Value *key, struct Value *value) {
-  return value_pair_new(value_pair_new(key, value), env);
-}
-
-struct Value *assoc_str(struct Value *env, struct SymbolTable *st, char* cstr, struct Value *val) {
-  return assoc(env, sym(st, cstr), val);
-}
-
-struct Value *assoc_native(struct Value *env, struct SymbolTable *st, char* cstr, NativeFuncPtr func) {
-  return assoc(env, sym(st, cstr), value_native_new(func));
-}
-
-int main(int argc, char **argv) {
-  init();
-
-  struct InputStream  *in  = input_stream_new(stdin);
-  struct OutputStream *out = output_stream_new(stdout);
-  struct SymbolTable  *st  = st_new(1024);
-  struct Value        *env = EMPTY_PAIR;
-
-  env = assoc_str(env, st, "nil", NIL);
-  env = assoc_native(env, st, "head", &native_head);
-  env = assoc_native(env, st, "tail", &native_tail);
-  env = assoc_native(env, st, "quote",  &native_quote);
-  env = assoc_native(env, st, "let",  &native_let);
-
-  struct Value *value = parse_value(in, st);
-  print_value(out, st, value);
-  print_char(out, '\n');
-  print_value(out, st, eval_value(env, value));
-  print_char(out, '\n');
   return 0;
 }
 
+struct elem *map_get(struct elem *frame, struct elem *m, struct elem *k) {
+  while(! map_is_empty(m)) {
+    if ( elem_eq(frame, k, map_key(m)) ) {
+      return map_value(m);
+    }
+    m = map_next(m);
+  }
+  return nil();
+}
 
+struct elem *map_set(
+  struct elem *frame, 
+  struct elem *m, 
+  struct elem *k, 
+  struct elem *v
+) {
+  if ( elem_eq(frame, map_get(frame, m, k), v) ) {
+    return m;
+  } else {
+    return alloc_map(frame, m, k, v);
+  }
+}
+
+struct elem *list_add(
+  struct elem *frame,
+  struct elem *l,
+  struct elem *v
+) {
+  return alloc_list(frame, l, v);
+}
+
+struct elem *set_add(
+  struct elem *frame,
+  struct elem *s,
+  struct elem *v
+) {
+  if ( ! set_contains(frame, s, v) ) {
+    return alloc_set(frame, s, v);
+  } else {
+    return s;
+  }
+}
+
+struct elem* trim_map(struct elem *frame, struct elem* m) {
+  struct elem *r  = empty_map();
+  struct elem *k;
+
+  while( ! map_is_empty(m) ) {
+    k = map_key(m);
+    if ( ! map_contains_key(frame, r, k) ) {
+      r = map_set(frame, r, k, map_value(m));
+    }
+    m = map_next(m);
+  }
+
+  return r;
+}
+
+struct elem* env_set(struct elem *frame, struct elem *key, struct elem *value) {
+  struct elem* env = map_get(frame, frame, sym_env());
+  env = map_set(frame, env, key, value);
+  return map_set(frame, frame, sym_env(), env);
+}
+
+struct elem* env_get(struct elem *frame, struct elem *key) {
+  struct elem* env = map_get(frame, frame, sym_env());
+  return map_get(frame, env, key);
+}
+
+struct elem* frame_set(struct elem *frame, struct elem *key, struct elem *value) {
+  return map_set(frame, frame, key, value);
+}
+
+struct elem* frame_get(struct elem *frame, struct elem *key) {
+  return map_get(frame, frame, key);
+}
+
+struct elem* new_child_frame(struct elem* frame, struct elem *e) {
+  struct elem* nf = empty_map();
+  nf = map_set(frame, nf, sym_parent(), frame);
+  nf = map_set(frame, nf, sym_env(), empty_map());
+  nf = map_set(frame, nf, sym_lhs(), empty_list());
+  nf = map_set(frame, nf, sym_rhs(), e);
+  nf = map_set(frame, nf, sym_alloc(), frame_get(frame, sym_alloc()));
+  return nf;
+}
+
+struct elem *frame_eval_step(struct elem *frame) 
+{
+  struct elem *lhs, *rhs, *value;
+
+  rhs = frame_get(frame, sym_rhs());
+  if ( ! is_list(rhs) ) {
+    frame = frame_set(frame, sym_lhs(), rhs);
+    frame = frame_set(frame, sym_rhs(), empty_list());
+    return frame;
+  }
+
+  if ( list_is_empty(rhs) ) {
+    return frame;
+  }
+
+  lhs = frame_get(frame, sym_lhs());
+  value = list_value(rhs);
+  rhs = list_next(rhs);
+
+  if ( is_list(value) ) {
+    frame = frame_set(frame, sym_rhs(), rhs); 
+    return new_child_frame(frame, value);
+  }
+
+  if ( is_sym(value) ) {
+    value = env_get(frame, value);
+  }
+
+  lhs = list_add(frame, lhs, value);
+  frame = frame_set(frame, sym_lhs(), lhs);
+  frame = frame_set(frame, sym_rhs(), rhs);
+
+  return frame;
+}
+
+void elem_print(struct elem *frame, FILE *out, struct elem *l);
+
+void list_print(struct elem *frame, FILE *out, struct elem *l) {
+  int first = 1;
+  fprintf(out, "(");
+  while(! list_is_empty(l)) {
+    if ( first ) {
+      first = 0;
+    } else {
+      fprintf(out, " ");
+    }
+    elem_print(frame, out, list_value(l));
+    l = list_next(l);
+  }
+  fprintf(out, ")");
+}
+
+void set_print(struct elem *frame, FILE *out, struct elem *l) {
+  fprintf(out, "#{");
+  int first = 1;
+  while(! set_is_empty(l)) {
+    if ( first ) {
+      first = 0;
+    } else {
+      fprintf(out, " ");
+    }
+    elem_print(frame, out, set_value(l));
+    l = set_next(l);
+  }
+  fprintf(out, "}");
+}
+
+void map_print(struct elem *frame, FILE *out, struct elem *l) {
+  int first = 1;
+  fprintf(out, "{");
+  while(! map_is_empty(l)) {
+    if ( first ) {
+      first = 0;
+    } else {
+      fprintf(out, " ");
+    }
+    elem_print(frame, out, map_key(l));
+    fprintf(out, " ");
+    elem_print(frame, out, map_value(l));
+    l = map_next(l);
+  }
+  fprintf(out, "}");
+}
+
+void sval_print(struct elem *frame, FILE *out, struct elem *s) {
+  fprintf(out, "%s", s->sval.str);
+}
+
+void string_print(struct elem *frame, FILE *out, struct elem *s) {
+  fprintf(out, "\"");
+  sval_print(frame, out, s);
+  fprintf(out, "\"");
+}
+
+void error_print(struct elem *frame, FILE *out, struct elem *s) {
+  fprintf(out, "<err:");
+  sval_print(frame, out, s);
+  fprintf(out, ">");
+}
+
+void sym_print(struct elem *frame, FILE *out, struct elem *s) {
+  fprintf(out, ":");
+  sval_print(frame, out, s);
+}
+
+void fn_print(struct elem *frame, FILE *out, struct elem *e) {
+  fprintf(out, "<fn:%p>", e->fval.fn);
+}
+
+void elem_print(struct elem *frame, FILE *out, struct elem *e) {
+  switch(e->type) {
+  case ELEM_TYPE_NIL:
+    fprintf(out, "nil");
+    break;
+  case ELEM_TYPE_INT:
+    fprintf(out, "%d", e->ival.value);
+    break;
+  case ELEM_TYPE_LIST:
+    list_print(frame, out, e);
+    break;
+  case ELEM_TYPE_STRING:
+    string_print(frame, out, e);
+    break;
+  case ELEM_TYPE_ERROR:
+    error_print(frame, out, e);
+    break;
+  case ELEM_TYPE_SYM:
+    sym_print(frame, out, e);
+    break;
+  case ELEM_TYPE_SET:
+    set_print(frame, out, e);
+    break;
+  case ELEM_TYPE_MAP:
+    map_print(frame, out, trim_map(frame, e));
+    break;
+  case ELEM_TYPE_FN:
+    fn_print(frame, out, e);
+    break;
+  case ELEM_TYPE_ALLOC:
+    fprintf(out, "<alloc:%p>", e->aval.alloc);
+    break;
+  default:
+    abort(); // invalid type
+  }
+}
+
+int main(int argc, char **argv) {
+  struct elem *frame = new_root_frame();
+  struct elem *e = empty_list();
+  e = list_add(frame, e, new_string(frame, "hello"));
+  e = list_add(frame, e, new_string(frame, "world"));
+  frame = frame_set(frame, sym_rhs(), e);
+  frame = frame_set(frame, sym_lhs(), empty_list());
+  frame = frame_set(frame, sym_env(), empty_map());
+  frame = frame_eval_step(frame);
+  frame = frame_eval_step(frame);
+  elem_print(frame, stdout, frame);
+  fprintf(stdout, "\n");
+  
+  return 0;
+}
