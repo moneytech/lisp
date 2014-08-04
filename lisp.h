@@ -18,11 +18,15 @@ struct elem_list {
 };
 
 #define ELEM_TYPE_STRING     4
-#define ELEM_TYPE_ERROR      5
-#define ELEM_TYPE_SYM     6
+#define ELEM_TYPE_SYM        5
 struct elem_string {
   uint32_t len;
   uint8_t *str;
+};
+
+#define ELEM_TYPE_ERROR      6
+struct elem_error {
+  struct elem *map;
 };
 
 #define ELEM_TYPE_MAP        7
@@ -37,6 +41,8 @@ typedef struct elem *(fn)(struct elem *frame);
 
 struct elem_fn {
   fn          *fn;
+  struct elem *args;
+  struct elem *expr;
 };
 
 #define ELEM_TYPE_ALLOC      9
@@ -60,6 +66,7 @@ struct elem {
     struct elem_map    mval;
     struct elem_fn     fval;
     struct elem_alloc  aval;
+    struct elem_error  eval;
   };
 };
 

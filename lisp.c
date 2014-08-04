@@ -41,6 +41,8 @@ DEFINE_SYM(SYM_ENV,    env)
 DEFINE_SYM(SYM_RHS,    rhs)
 DEFINE_SYM(SYM_LHS,    lhs)
 DEFINE_SYM(SYM_PARENT, parent)
+DEFINE_SYM(SYM_MSG,    msg)
+DEFINE_SYM(SYM_FRAME,  frame)
 
 struct elem NIL        = { 
   .type = ELEM_TYPE_NIL,
@@ -107,6 +109,10 @@ int is_list(struct elem *s) {
   return s->type == ELEM_TYPE_LIST;
 }
 
+int is_fn(struct elem *s) {
+  return s->type == ELEM_TYPE_FN;
+}
+
 int is_sym(struct elem *s) {
   return s->type == ELEM_TYPE_SYM;
 }
@@ -159,15 +165,6 @@ struct elem *new_int(struct elem *frame, int i) {
 struct elem *new_string(struct elem *frame, char *s) {
   struct elem *ret = frame_alloc_elem(frame);
   ret->type = ELEM_TYPE_STRING;
-  ret->sval.len = strlen(s) + 1;
-  ret->sval.str = NEW_ARRAY(uint8_t, ret->sval.len+1);
-  memcpy(ret->sval.str, s, ret->sval.len);
-  return ret;
-}
-
-struct elem *new_error(struct elem *frame, char *s) {
-  struct elem *ret = frame_alloc_elem(frame);
-  ret->type = ELEM_TYPE_ERROR;
   ret->sval.len = strlen(s) + 1;
   ret->sval.str = NEW_ARRAY(uint8_t, ret->sval.len+1);
   memcpy(ret->sval.str, s, ret->sval.len);
@@ -458,39 +455,89 @@ struct elem* new_child_frame(struct elem* frame, struct elem *e) {
   return nf;
 }
 
+struct elem *new_error(struct elem *frame, char *str) {
+  struct elem *e = frame_alloc_elem(frame);
+  struct elem *m = empty_map();
+
+  m = map_set(frame, m, sym_msg(), new_string(frame, str));
+  m = map_set(frame, m, sym_frame(), frame);
+  
+  e->type = ELEM_TYPE_ERROR;
+  e->eval.map = m;
+  
+  return e;
+}
+
+struct elem *list_reverse(struct elem *frame, struct elem *l) {
+  struct elem *r = empty_list();
+  while( ! list_is_empty(l) ) {
+    r = list_add(frame, r, list_value(l));
+  }
+  return r;
+}
+
+struct elem *frame_error(struct elem *frame, struct elem *error) {
+  abort();
+}
+
+struct elem *frame_call(struct elem *frame, struct elem *fn, struct elem *args) {
+  struct elem *child_frame = new_child_frame(frame, fn->fval.expr);
+  struct elem *fn_args = fn->fval.args;
+  while( ! list_is_empty(args) && ! list_is_empty(fn_args) ) {
+    env_set(child_frame, list_value(args), list_value(fn_args));
+    args = list_next(args);
+    fn_args = list_next(fn_args);
+  }
+  return child_frame;
+}
+
 struct elem *frame_eval_step(struct elem *frame) 
 {
-  struct elem *lhs, *rhs, *value;
+  struct elem *lhs, *rhs, *value, *fn;
 
-  rhs = frame_get(frame, sym_rhs());
-  if ( ! is_list(rhs) ) {
-    frame = frame_set(frame, sym_lhs(), rhs);
-    frame = frame_set(frame, sym_rhs(), empty_list());
+  while(1) {
+
+    rhs = frame_get(frame, sym_rhs());
+    if ( ! is_list(rhs) ) {
+      frame = frame_set(frame, sym_lhs(), rhs);
+      frame = frame_set(frame, sym_rhs(), empty_list());
+      return frame;
+    }
+    
+    lhs = frame_get(frame, sym_lhs());
+    
+    if ( list_is_empty(rhs) ) {
+      if ( is_list(lhs) ) {
+        if ( ! list_is_empty(lhs) ) {
+          lhs = list_reverse(frame, lhs);
+          fn = list_value(lhs);
+          if ( ! is_fn(fn) ) {
+            return frame_error(frame, new_error(frame, "Expected function"));
+          }
+          return frame_call(frame, fn, lhs);
+        }
+      }
+      return frame;
+    }
+
+    value = list_value(rhs);
+    rhs = list_next(rhs);
+    
+    if ( is_list(value) ) {
+      frame = frame_set(frame, sym_rhs(), rhs); 
+      return new_child_frame(frame, value);
+    }
+    
+    if ( is_sym(value) ) {
+      value = env_get(frame, value);
+    }
+    
+    lhs = list_add(frame, lhs, value);
+    frame = frame_set(frame, sym_lhs(), lhs);
+    frame = frame_set(frame, sym_rhs(), rhs);
+    
     return frame;
   }
-
-  if ( list_is_empty(rhs) ) {
-    return frame;
-  }
-
-  lhs = frame_get(frame, sym_lhs());
-  value = list_value(rhs);
-  rhs = list_next(rhs);
-
-  if ( is_list(value) ) {
-    frame = frame_set(frame, sym_rhs(), rhs); 
-    return new_child_frame(frame, value);
-  }
-
-  if ( is_sym(value) ) {
-    value = env_get(frame, value);
-  }
-
-  lhs = list_add(frame, lhs, value);
-  frame = frame_set(frame, sym_lhs(), lhs);
-  frame = frame_set(frame, sym_rhs(), rhs);
-
-  return frame;
 }
 
 void elem_print(struct elem *frame, FILE *out, struct elem *l);
