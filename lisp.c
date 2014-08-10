@@ -6,6 +6,10 @@
 
 #define NEW(t) (t *)calloc(sizeof(t), 1)
 #define NEW_ARRAY(t, l) (t *)calloc(sizeof(t), l)
+#define ERROR_UNLESS_IS_TYPE(frame, e, t)        \
+  if ( ! is_type(e, t) ) {   \
+    return new_error(frame, "Type mismatch");             \
+  };
 
 struct elem EMPTY_LIST = { 
   .type = ELEM_TYPE_LIST,
@@ -43,11 +47,23 @@ DEFINE_SYM(SYM_LHS,    lhs)
 DEFINE_SYM(SYM_PARENT, parent)
 DEFINE_SYM(SYM_MSG,    msg)
 DEFINE_SYM(SYM_FRAME,  frame)
+DEFINE_SYM(SYM_ERROR,  error)
+DEFINE_SYM(SYM_CURR_CHAR, curr_char)
+DEFINE_SYM(SYM_EXPR, expr)
+DEFINE_SYM(SYM_POS, pos)
+DEFINE_SYM(SYM_INPUT, input)
 
 struct elem NIL        = { 
   .type = ELEM_TYPE_NIL,
+};
+
+struct elem TRUE        = { 
+  .type = ELEM_TYPE_TRUE,
+};
+
+struct elem FALSE        = { 
+  .type = ELEM_TYPE_FALSE,
   .lval.value = 0,
-  .lval.next = 0
 };
 
 struct elem *map_get(struct elem *frame, struct elem *m, struct elem *k);
@@ -55,6 +71,14 @@ struct elem *map_set(struct elem *frame, struct elem *m, struct elem *k, struct 
 
 struct elem *nil() {
   return &NIL;
+}
+
+struct elem *false_value() {
+  return &FALSE;
+}
+
+struct elem *true_value() {
+  return &TRUE;
 }
 
 struct elem *empty_list() {
@@ -111,6 +135,10 @@ int is_list(struct elem *s) {
 
 int is_fn(struct elem *s) {
   return s->type == ELEM_TYPE_FN;
+}
+
+int int_value(struct elem *e) {
+  return e->ival.value;
 }
 
 int is_sym(struct elem *s) {
@@ -181,7 +209,7 @@ struct elem *new_root_frame() {
   return f;
 }
 
-int elem_is_type(struct elem *e, int type) {
+int is_type(struct elem *e, int type) {
   return e->type == type;
 }
 
@@ -601,7 +629,7 @@ void string_print(struct elem *frame, FILE *out, struct elem *s) {
 
 void error_print(struct elem *frame, FILE *out, struct elem *s) {
   fprintf(out, "<err:");
-  sval_print(frame, out, s);
+  elem_print(frame, out, s->eval.map);
   fprintf(out, ">");
 }
 
@@ -612,6 +640,213 @@ void sym_print(struct elem *frame, FILE *out, struct elem *s) {
 
 void fn_print(struct elem *frame, FILE *out, struct elem *e) {
   fprintf(out, "<fn:%p>", e->fval.fn);
+}
+
+struct elem *elem_read(struct elem *frame);
+struct elem *map_read(struct elem *frame);
+struct elem *list_read(struct elem *frame);
+struct elem *string_read(struct elem *frame);
+struct elem *symbol_read(struct elem *frame);
+
+struct elem *reader_set_expr(struct elem *frame, struct elem *expr) {
+  return frame_set(frame, sym_expr(), expr);
+}
+
+struct elem *reader_get_expr(struct elem *frame) {
+  return frame_get(frame, sym_expr());
+}
+
+struct elem *reader_set_error(struct elem *frame, struct elem *err) {
+  return frame_set(frame, sym_error(), err);
+}
+
+struct elem *reader_get_error(struct elem *frame) {
+  return frame_get(frame, sym_error());
+}
+
+struct elem *reader_set_curr_char(struct elem *frame, struct elem *c) {
+  return frame_set(frame, sym_curr_char(), c);
+}
+
+struct elem *reader_get_curr_char(struct elem *frame) {
+  return frame_get(frame, sym_curr_char());
+}
+
+struct elem *reader_set_pos(struct elem *frame, struct elem *e) {
+  return frame_set(frame, sym_pos(), e);
+}
+
+struct elem *reader_get_pos(struct elem *frame) {
+  return frame_get(frame, sym_pos());
+}
+
+struct elem *reader_set_input(struct elem *frame, struct elem *e) {
+  return frame_set(frame, sym_input(), e);
+}
+
+struct elem *reader_get_input(struct elem *frame) {
+  return frame_get(frame, sym_input());
+}
+
+int reader_has_error(struct elem *frame) {
+  return frame_get(frame, sym_error()) != nil();
+}
+
+int is_true(struct elem *expr) {
+  return expr != nil() && ! is_type(expr, ELEM_TYPE_ERROR) && expr != false_value();
+}
+
+int is_false(struct elem *frame, struct elem *expr) {
+  return expr != nil() || is_type(expr, ELEM_TYPE_ERROR) || expr == false_value();
+}
+
+struct elem *int_leq(struct elem *frame, struct elem *a, struct elem *b) {
+  ERROR_UNLESS_IS_TYPE(frame, a, ELEM_TYPE_INT);
+  ERROR_UNLESS_IS_TYPE(frame, b, ELEM_TYPE_INT);
+  if ( int_value(a) < int_value(b) ) {
+    return true_value();
+  } else {
+    return nil();
+  }
+}
+
+struct elem *string_char_at(struct elem *frame, struct elem *s, struct elem *p) {
+  ERROR_UNLESS_IS_TYPE(frame, s, ELEM_TYPE_STRING);
+  ERROR_UNLESS_IS_TYPE(frame, p, ELEM_TYPE_INT);
+  if ( p->ival.value < s->sval.len ) {
+    return new_int(frame, s->sval.str[p->ival.value]);
+  } else {
+    return new_error(frame, "Position exceeds length of string");
+  }
+}
+
+struct elem *string_size(struct elem *frame, struct elem *s) {
+  ERROR_UNLESS_IS_TYPE(frame, s, ELEM_TYPE_STRING);
+  return new_int(frame, s->sval.len);
+}
+
+struct elem *int_plus(struct elem *frame, struct elem *a, struct elem *b) {
+  ERROR_UNLESS_IS_TYPE(frame, a, ELEM_TYPE_INT);
+  ERROR_UNLESS_IS_TYPE(frame, b, ELEM_TYPE_INT);
+  return new_int(frame, a->ival.value + b->ival.value);
+}
+
+struct elem* reader_next_char(struct elem *frame) {
+  struct elem *pos = reader_get_pos(frame);
+  struct elem *input = reader_get_input(frame);
+  if ( is_true(int_leq(frame, pos, string_size(frame, input))) ) {
+    pos = int_plus(frame, pos, new_int(frame, 1));
+    frame = reader_set_pos(frame, pos);
+    frame = reader_set_curr_char(frame, string_char_at(frame, input, pos));
+  } else {
+    frame = reader_set_error(frame, new_error(frame, "End of string encountered while reading"));
+  }
+  return frame;
+}
+                           
+
+struct elem *string_read(struct elem *frame) {
+  char buf[4096];
+  int  tail = 0;
+  int  len = sizeof(buf);
+  frame = reader_next_char(frame);
+
+  while( int_value(reader_get_curr_char(frame)) != '"' && tail < len ) {
+    buf[tail++] = int_value(reader_get_curr_char(frame));
+    frame = reader_next_char(frame);
+  }
+  buf[tail] = 0;
+  frame = reader_next_char(frame);
+
+  return reader_set_expr(frame, new_string(frame, buf));
+}
+
+struct elem *is_space(struct elem *frame, struct elem *c) {
+  if ( int_value(c) == ' ' || int_value(c) == '\n' || int_value(c) == '\t' ) {
+    return true_value();
+  } else {
+    return false_value();
+  }
+}
+
+struct elem *reader_skip_whitespace(struct elem *frame) {
+  while( is_true(is_space(frame, reader_get_curr_char(frame))) ) {
+    frame = reader_next_char(frame);
+  }
+  return frame;
+}
+
+struct elem *map_read(struct elem *frame) {
+  struct elem* map = empty_map();
+  struct elem* key, *value;
+  
+  frame = reader_skip_whitespace(frame);
+
+  while(! reader_has_error(frame) ) {
+    switch(int_value(reader_get_curr_char(frame))) {
+    case '}':
+      frame = reader_set_expr(frame, map);
+      return frame;
+    default:
+      frame = elem_read(frame);
+      key = reader_get_expr(frame);
+      frame = elem_read(frame);
+      value = reader_get_expr(frame);
+      map_set(frame, map, key, value);
+      break;
+    }
+  }
+
+  return frame;
+}
+
+struct elem *list_read(struct elem *frame) {
+  struct elem* list = empty_list();
+  struct elem *value;
+  
+  frame = reader_next_char(frame);
+  frame = reader_skip_whitespace(frame);
+
+  while(! reader_has_error(frame) ) {
+    switch(int_value(reader_get_curr_char(frame))) {
+    case ')':
+      frame = reader_set_expr(frame, list);
+      return frame;
+    default:
+      frame = elem_read(frame);
+      value = reader_get_expr(frame);
+      list = list_add(frame, list, value);
+      break;
+    }
+  }
+
+  return frame;
+}
+
+
+struct elem *elem_read(struct elem *frame) {
+  frame = reader_skip_whitespace(frame);
+  int c = int_value(reader_get_curr_char(frame));
+
+  switch(c) {
+  case '{':
+    return map_read(frame);
+  case '(':
+    return list_read(frame);
+  case '"':
+    return string_read(frame);
+  }
+
+  return reader_set_error(frame, new_error(frame, "Symbol not recognised."));
+}
+
+struct elem *reader_new_frame(struct elem *frame, char *expr) {
+  struct elem* pos = new_int(frame, 0);
+  struct elem* input = new_string(frame, expr);
+  frame = reader_set_input(frame, input);
+  frame = reader_set_pos(frame, pos);
+  frame = reader_set_curr_char(frame, string_char_at(frame, input, pos));
+  return frame;
 }
 
 void elem_print(struct elem *frame, FILE *out, struct elem *e) {
@@ -651,6 +886,32 @@ void elem_print(struct elem *frame, FILE *out, struct elem *e) {
   }
 }
 
+int test_parsing(char *expr) {
+  struct elem *frame = reader_new_frame(new_root_frame(), expr);
+  frame = elem_read(frame);
+  if ( reader_has_error(frame) ) {
+    elem_print(frame, stdout, reader_get_error(frame));
+    fprintf(stdout, "\n");
+    return 1;
+  } else {
+    elem_print(frame, stdout, reader_get_expr(frame));
+    fprintf(stdout, "\n");
+    return 0;
+  }
+}
+
+int test_reader_1() {
+  return test_parsing("\"hello\"");
+}
+
+int test_reader_2() {
+  return test_parsing("(\"hello\")");
+}
+
+int test_reader_3() {
+  return test_parsing("(\"hello\" \"world\")");
+}
+
 int main(int argc, char **argv) {
   struct elem *frame = new_root_frame();
   struct elem *e = empty_list();
@@ -663,6 +924,9 @@ int main(int argc, char **argv) {
   frame = frame_eval_step(frame);
   elem_print(frame, stdout, frame);
   fprintf(stdout, "\n");
-  
+
+  test_reader_1();
+  test_reader_2();
+  test_reader_3();
   return 0;
 }

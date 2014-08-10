@@ -4,39 +4,41 @@
 #include <stdint.h>
 
 #define ELEM_TYPE_NIL        0
+#define ELEM_TYPE_TRUE       1
+#define ELEM_TYPE_FALSE      2
 
-#define ELEM_TYPE_INT        1
+#define ELEM_TYPE_INT        3
 typedef struct elem_int {
   uint32_t value;
 } elem_int_t;
 
-#define ELEM_TYPE_LIST       2
-#define ELEM_TYPE_SET        3
+#define ELEM_TYPE_LIST       4
+#define ELEM_TYPE_SET        5
 struct elem_list {
   struct elem *value;
   struct elem *next;
 };
 
-#define ELEM_TYPE_STRING     4
-#define ELEM_TYPE_SYM        5
+#define ELEM_TYPE_STRING     6
+#define ELEM_TYPE_SYM        7
 struct elem_string {
   uint32_t len;
   uint8_t *str;
 };
 
-#define ELEM_TYPE_ERROR      6
+#define ELEM_TYPE_ERROR      8
 struct elem_error {
   struct elem *map;
 };
 
-#define ELEM_TYPE_MAP        7
+#define ELEM_TYPE_MAP        9
 struct elem_map {
   struct elem *key;
   struct elem *value;
   struct elem *next;
 };
 
-#define ELEM_TYPE_FN         8
+#define ELEM_TYPE_FN         10
 typedef struct elem *(fn)(struct elem *frame);
 
 struct elem_fn {
@@ -45,7 +47,7 @@ struct elem_fn {
   struct elem *expr;
 };
 
-#define ELEM_TYPE_ALLOC      9
+#define ELEM_TYPE_ALLOC      11
 struct alloc {
   uint32_t len;
   uint32_t tail;
