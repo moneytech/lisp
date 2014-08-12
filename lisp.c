@@ -81,6 +81,22 @@ struct elem *true_value() {
   return &TRUE;
 }
 
+int is_type(struct elem *e, int type) {
+  return e->type == type;
+}
+
+int is_nil(struct elem *e) {
+  return e == nil();
+}
+
+int is_true(struct elem *expr) {
+  return expr != nil() && ! is_type(expr, ELEM_TYPE_ERROR) && expr != false_value();
+}
+
+int is_false(struct elem *frame, struct elem *expr) {
+  return expr != nil() || is_type(expr, ELEM_TYPE_ERROR) || expr == false_value();
+}
+
 struct elem *empty_list() {
   return &EMPTY_LIST;
 }
@@ -199,6 +215,13 @@ struct elem *new_string(struct elem *frame, char *s) {
   return ret;
 }
 
+struct elem *new_fn(struct elem *frame, fn *fn) {
+  struct elem *ret = frame_alloc_elem(frame);
+  ret->type = ELEM_TYPE_FN;
+  ret->fval.fn = fn;
+  return ret;
+}
+
 struct elem *new_root_frame() {
   struct elem *a = new_alloc_elem();
   struct elem *f = alloc_elem(a);
@@ -207,10 +230,6 @@ struct elem *new_root_frame() {
   f->mval.value = a;
   f->mval.next = empty_map();
   return f;
-}
-
-int is_type(struct elem *e, int type) {
-  return e->type == type;
 }
 
 struct elem *alloc_map(
@@ -519,21 +538,21 @@ struct elem *frame_call(struct elem *frame, struct elem *fn, struct elem *args) 
   return child_frame;
 }
 
-struct elem *frame_eval_step(struct elem *frame) 
+struct elem *frame_eval(struct elem *frame) 
 {
-  struct elem *lhs, *rhs, *value, *fn;
+  struct elem *lhs, *rhs, *value, *fn, *ret, *parent;
 
   while(1) {
 
     rhs = frame_get(frame, sym_rhs());
+
     if ( ! is_list(rhs) ) {
       frame = frame_set(frame, sym_lhs(), rhs);
       frame = frame_set(frame, sym_rhs(), empty_list());
-      return frame;
+      continue;
     }
     
     lhs = frame_get(frame, sym_lhs());
-    
     if ( list_is_empty(rhs) ) {
       if ( is_list(lhs) ) {
         if ( ! list_is_empty(lhs) ) {
@@ -542,10 +561,21 @@ struct elem *frame_eval_step(struct elem *frame)
           if ( ! is_fn(fn) ) {
             return frame_error(frame, new_error(frame, "Expected function"));
           }
-          return frame_call(frame, fn, lhs);
+          frame = frame_call(frame_get(frame, sym_parent()), fn, lhs);
+          continue;
         }
+      } 
+
+      // return from current frame
+      parent = frame_get(frame, sym_parent());
+      if ( is_nil(parent) ) {
+        return frame_get(frame, sym_lhs());
       }
-      return frame;
+
+      ret   = lhs;
+      lhs   = frame_get(frame, sym_parent());
+      frame = frame_set(frame, sym_lhs(), list_add(frame, lhs, ret));
+      continue;
     }
 
     value = list_value(rhs);
@@ -553,7 +583,8 @@ struct elem *frame_eval_step(struct elem *frame)
     
     if ( is_list(value) ) {
       frame = frame_set(frame, sym_rhs(), rhs); 
-      return new_child_frame(frame, value);
+      frame = new_child_frame(frame, value);
+      continue;
     }
     
     if ( is_sym(value) ) {
@@ -563,8 +594,6 @@ struct elem *frame_eval_step(struct elem *frame)
     lhs = list_add(frame, lhs, value);
     frame = frame_set(frame, sym_lhs(), lhs);
     frame = frame_set(frame, sym_rhs(), rhs);
-    
-    return frame;
   }
 }
 
@@ -690,14 +719,6 @@ struct elem *reader_get_input(struct elem *frame) {
 
 int reader_has_error(struct elem *frame) {
   return frame_get(frame, sym_error()) != nil();
-}
-
-int is_true(struct elem *expr) {
-  return expr != nil() && ! is_type(expr, ELEM_TYPE_ERROR) && expr != false_value();
-}
-
-int is_false(struct elem *frame, struct elem *expr) {
-  return expr != nil() || is_type(expr, ELEM_TYPE_ERROR) || expr == false_value();
 }
 
 struct elem *int_leq(struct elem *frame, struct elem *a, struct elem *b) {
@@ -886,18 +907,46 @@ void elem_print(struct elem *frame, FILE *out, struct elem *e) {
   }
 }
 
-int test_parsing(char *expr) {
-  struct elem *frame = reader_new_frame(new_root_frame(), expr);
+struct elem* elem_println(struct elem *frame, FILE *out, struct elem *expr) {
+  elem_print(frame, out, expr);
+  fprintf(out, "\n");
+  return frame;
+}
+
+struct elem *reader_read(struct elem *frame, char *expr) {
+  frame = reader_new_frame(frame, expr);
   frame = elem_read(frame);
   if ( reader_has_error(frame) ) {
-    elem_print(frame, stdout, reader_get_error(frame));
-    fprintf(stdout, "\n");
+    return reader_get_error(frame);
+  } else {
+    return reader_get_expr(frame);
+  }
+}
+
+int test_parsing(char *expr) {
+  struct elem* frame = reader_new_frame(new_root_frame(), expr);
+  frame = elem_read(frame);
+  if ( reader_has_error(frame) ) {
+    elem_println(frame, stdout, reader_get_error(frame));
     return 1;
   } else {
-    elem_print(frame, stdout, reader_get_expr(frame));
-    fprintf(stdout, "\n");
+    elem_println(frame, stdout, reader_get_expr(frame));
     return 0;
   }
+}
+
+int test_eval(char *expr) {
+  struct elem *frame = new_root_frame();
+  frame = frame_set(frame, sym_rhs(), reader_read(new_root_frame(), expr));
+  frame = frame_set(frame, sym_lhs(), empty_list());
+  frame = frame_set(frame, sym_env(), empty_map());
+  frame = frame_eval(frame);
+  elem_println(frame, stdout, frame);
+  return 1;
+}
+
+int test_eval_1() {
+  return test_eval("\"hello\"");
 }
 
 int test_reader_1() {
@@ -913,20 +962,11 @@ int test_reader_3() {
 }
 
 int main(int argc, char **argv) {
-  struct elem *frame = new_root_frame();
-  struct elem *e = empty_list();
-  e = list_add(frame, e, new_string(frame, "hello"));
-  e = list_add(frame, e, new_string(frame, "world"));
-  frame = frame_set(frame, sym_rhs(), e);
-  frame = frame_set(frame, sym_lhs(), empty_list());
-  frame = frame_set(frame, sym_env(), empty_map());
-  frame = frame_eval_step(frame);
-  frame = frame_eval_step(frame);
-  elem_print(frame, stdout, frame);
-  fprintf(stdout, "\n");
 
   test_reader_1();
   test_reader_2();
   test_reader_3();
+
+  test_eval_1();
   return 0;
 }
