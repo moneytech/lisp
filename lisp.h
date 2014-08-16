@@ -21,24 +21,25 @@ struct elem_list {
 
 #define ELEM_TYPE_STRING     6
 #define ELEM_TYPE_SYM        7
+#define ELEM_TYPE_IDENT      8
 struct elem_string {
   uint32_t len;
-  uint8_t *str;
+  char  *str;
 };
 
-#define ELEM_TYPE_ERROR      8
+#define ELEM_TYPE_ERROR      9
 struct elem_error {
   struct elem *map;
 };
 
-#define ELEM_TYPE_MAP        9
+#define ELEM_TYPE_MAP        10
 struct elem_map {
   struct elem *key;
   struct elem *value;
   struct elem *next;
 };
 
-#define ELEM_TYPE_FN         10
+#define ELEM_TYPE_FN         11
 typedef struct elem *(fn)(struct elem *frame);
 
 struct elem_fn {
@@ -47,7 +48,7 @@ struct elem_fn {
   struct elem *expr;
 };
 
-#define ELEM_TYPE_ALLOC      11
+#define ELEM_TYPE_ALLOC      12
 struct alloc {
   uint32_t len;
   uint32_t tail;

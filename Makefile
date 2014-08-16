@@ -10,7 +10,7 @@ build/lisp: lisp.c Makefile
 clean: 
 	rm -f build
 
-run: build/lisp
-	build/lisp
+test: build/lisp
+	valgrind --leak-check=full build/lisp
 
-.PHONY: run clean build
+.PHONY: test clean build
